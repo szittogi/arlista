@@ -1,0 +1,463 @@
+<!doctype html>
+<html lang="hu">
+<head>
+  <meta charset="utf-8" />
+  <meta name="viewport" content="width=device-width,initial-scale=1" />
+  <title>Terméklista upsell termékekkel</title>
+
+  <!-- XLSX olvasás böngészőben -->
+  <script src="https://cdn.jsdelivr.net/npm/xlsx/dist/xlsx.full.min.js"></script>
+
+  <style>
+    body{
+      font-family: Arial, sans-serif;
+      margin: 20px;
+      background:#f7f9fc;
+      color:#1f2937;
+    }
+    h1{
+      margin:0 0 16px 0;
+      font-size:24px;
+    }
+    .topbar{
+      margin-bottom:16px;
+      display:flex;
+      gap:10px;
+      flex-wrap:wrap;
+      align-items:center;
+    }
+    input[type="text"]{
+      padding:10px 12px;
+      width:360px;
+      max-width:100%;
+      border:1px solid #cbd5e1;
+      border-radius:8px;
+      font-size:14px;
+      background:#fff;
+    }
+    button{
+      padding:8px 12px;
+      border:none;
+      border-radius:8px;
+      background:#0f62fe;
+      color:#fff;
+      cursor:pointer;
+      font-size:14px;
+    }
+    button:hover{
+      background:#0b4fd1;
+    }
+    .small-btn{
+      padding:6px 10px;
+      font-size:13px;
+    }
+    .status{
+      margin:8px 0 14px 0;
+      font-size:14px;
+      color:#475569;
+    }
+    .table-wrap{
+      overflow-x:auto;
+      background:#fff;
+      border:1px solid #e2e8f0;
+      border-radius:12px;
+      box-shadow:0 2px 8px rgba(0,0,0,0.04);
+    }
+    table{
+      width:100%;
+      border-collapse:collapse;
+      min-width:900px;
+    }
+    th, td{
+      padding:10px 12px;
+      border-bottom:1px solid #e5e7eb;
+      text-align:left;
+      vertical-align:top;
+      font-size:14px;
+    }
+    th{
+      background:#f1f5f9;
+      position:sticky;
+      top:0;
+      z-index:1;
+    }
+    tr:hover td{
+      background:#fafcff;
+    }
+    .muted{
+      color:#64748b;
+    }
+    .nested-wrap{
+      background:#f8fafc;
+      border:1px solid #e2e8f0;
+      border-radius:10px;
+      padding:10px;
+      margin:6px 0;
+    }
+    .nested-title{
+      font-weight:bold;
+      margin-bottom:8px;
+    }
+    .nested-table{
+      min-width:unset;
+      width:100%;
+      border-collapse:collapse;
+      background:#fff;
+      border:1px solid #e2e8f0;
+      border-radius:8px;
+      overflow:hidden;
+    }
+    .nested-table th, .nested-table td{
+      padding:8px 10px;
+      font-size:13px;
+      border-bottom:1px solid #e5e7eb;
+    }
+    .badge{
+      display:inline-block;
+      padding:2px 8px;
+      border-radius:999px;
+      font-size:12px;
+      background:#e2e8f0;
+      color:#334155;
+    }
+    .error{
+      color:#b91c1c;
+      font-weight:bold;
+    }
+  </style>
+</head>
+<body>
+  <h1>Terméklista</h1>
+
+  <div class="topbar">
+    <input id="searchInput" type="text" placeholder="Keresés cikkszámra, névre vagy méretre..." />
+    <button id="reloadBtn">Újratöltés</button>
+  </div>
+
+  <div id="status" class="status">Betöltés...</div>
+
+  <div class="table-wrap">
+    <table id="mainTable">
+      <thead>
+        <tr>
+          <th>Cikkszám</th>
+          <th>Név</th>
+          <th>Méret</th>
+          <th>Hasonló termékek</th>
+        </tr>
+      </thead>
+      <tbody id="tableBody">
+        <tr><td colspan="4">Betöltés...</td></tr>
+      </tbody>
+    </table>
+  </div>
+
+  <script>
+    const DATA_URL = "https://app.clouderp.hu/api/1/automatism/file-share/?s=Z0FBQUFBQnBydC1sMzB4aDY4Ny1qUHdKZmNTSEV0MzJwaFB6UHhoeDVyUHc2YTNqeWlYTUVtSTFiZDZCQ3RnbmZ0ckpYc1hNRjI3MXFFeTA2ZGpVaHpKckJLOENLSzRTbjJzdzM4U1lSazVhUnFDMTZkREFjalk9";
+
+    let allRows = [];
+    let filteredRows = [];
+    let skuMap = new Map();
+
+    function normalizeText(v) {
+      return String(v || "")
+        .trim()
+        .toLowerCase()
+        .normalize("NFD")
+        .replace(/[\u0300-\u036f]/g, "");
+    }
+
+    function firstExisting(obj, keys) {
+      for (const key of keys) {
+        if (obj[key] !== undefined && obj[key] !== null && String(obj[key]).trim() !== "") {
+          return obj[key];
+        }
+      }
+      return "";
+    }
+
+    function getSku(row) {
+      return firstExisting(row, [
+        "Cikkszám (sku)",
+        "Cikkszám",
+        "sku",
+        "SKU",
+        "Sku"
+      ]);
+    }
+
+    function getName(row) {
+      return firstExisting(row, [
+        "Név",
+        "Megnevezés",
+        "name",
+        "Name",
+        "Terméknév"
+      ]);
+    }
+
+    function getSize(row) {
+      return firstExisting(row, [
+        "Méretértékek",
+        "Méret",
+        "Méretek",
+        "Meret",
+        "Méretei (HxSzxM [mm])"
+      ]);
+    }
+
+    function getUpsell(row) {
+      return firstExisting(row, [
+        "upsell termékek",
+        "Upsell termékek",
+        "upsell",
+        "Upsell",
+        "Hasonló termékek"
+      ]);
+    }
+
+    function getPrice(row) {
+      return firstExisting(row, [
+        "Bruttó ár",
+        "Bruttó Ár",
+        "Nettó ár",
+        "Nettó Ár",
+        "Ár",
+        "Eladási ár",
+        "Listaár",
+        "price",
+        "Price"
+      ]) || "—";
+    }
+
+    function cleanSizeText(size) {
+      return String(size || "").replace(/^Méretei\s*\(HxSzxM\s*\[mm\]\)\s*-\s*/i, "").trim() || String(size || "");
+    }
+
+    function parseUpsellList(value) {
+      if (!value) return [];
+      return String(value)
+        .split(/[,\n;|]+/)
+        .map(x => x.trim())
+        .filter(Boolean);
+    }
+
+    function escapeHtml(str) {
+      return String(str ?? "")
+        .replace(/&/g, "&amp;")
+        .replace(/</g, "&lt;")
+        .replace(/>/g, "&gt;")
+        .replace(/"/g, "&quot;")
+        .replace(/'/g, "&#39;");
+    }
+
+    async function fetchArrayBuffer(url) {
+      const response = await fetch(url);
+      if (!response.ok) {
+        throw new Error("Hiba a letöltés során: " + response.status + " " + response.statusText);
+      }
+      return await response.arrayBuffer();
+    }
+
+    function workbookToJson(arrayBuffer) {
+      const workbook = XLSX.read(arrayBuffer, { type: "array" });
+      const firstSheetName = workbook.SheetNames[0];
+      const sheet = workbook.Sheets[firstSheetName];
+      return XLSX.utils.sheet_to_json(sheet, { defval: "" });
+    }
+
+    function rebuildSkuMap() {
+      skuMap = new Map();
+      for (const row of allRows) {
+        const sku = String(getSku(row)).trim();
+        if (sku) skuMap.set(sku, row);
+      }
+    }
+
+    function renderTable(rows) {
+      const tbody = document.getElementById("tableBody");
+
+      if (!rows.length) {
+        tbody.innerHTML = `<tr><td colspan="4">Nincs találat.</td></tr>`;
+        return;
+      }
+
+      tbody.innerHTML = rows.map((row, index) => {
+        const sku = escapeHtml(getSku(row));
+        const name = escapeHtml(getName(row));
+        const size = escapeHtml(cleanSizeText(getSize(row)));
+        const upsellList = parseUpsellList(getUpsell(row));
+        const btnLabel = upsellList.length ? `Megnézem (${upsellList.length})` : `Nincs`;
+        const disabled = upsellList.length ? "" : "disabled";
+
+        return `
+          <tr data-row-index="${index}">
+            <td>${sku}</td>
+            <td>${name}</td>
+            <td>${size}</td>
+            <td>
+              <button class="small-btn toggle-btn" data-index="${index}" ${disabled}>
+                ${btnLabel}
+              </button>
+            </td>
+          </tr>
+          <tr class="details-row" id="details-${index}" style="display:none;">
+            <td colspan="4"></td>
+          </tr>
+        `;
+      }).join("");
+
+      document.querySelectorAll(".toggle-btn").forEach(btn => {
+        btn.addEventListener("click", () => toggleDetails(Number(btn.dataset.index)));
+      });
+    }
+
+    function buildUpsellHtml(baseRow) {
+      const upsellSkus = parseUpsellList(getUpsell(baseRow));
+
+      if (!upsellSkus.length) {
+        return `<div class="nested-wrap"><span class="muted">Ehhez a termékhez nincs megadva upsell termék.</span></div>`;
+      }
+
+      const found = [];
+      const missing = [];
+
+      for (const sku of upsellSkus) {
+        const item = skuMap.get(sku);
+        if (item) {
+          found.push(item);
+        } else {
+          missing.push(sku);
+        }
+      }
+
+      let html = `<div class="nested-wrap">`;
+      html += `<div class="nested-title">Hasonló / upsell termékek</div>`;
+
+      if (found.length) {
+        html += `
+          <table class="nested-table">
+            <thead>
+              <tr>
+                <th>Cikkszám</th>
+                <th>Név</th>
+                <th>Ár</th>
+                <th>Méret</th>
+              </tr>
+            </thead>
+            <tbody>
+              ${found.map(item => `
+                <tr>
+                  <td>${escapeHtml(getSku(item))}</td>
+                  <td>${escapeHtml(getName(item))}</td>
+                  <td>${escapeHtml(getPrice(item))}</td>
+                  <td>${escapeHtml(cleanSizeText(getSize(item)))}</td>
+                </tr>
+              `).join("")}
+            </tbody>
+          </table>
+        `;
+      } else {
+        html += `<div class="muted">A megadott upsell SKU-k nem találhatók a listában.</div>`;
+      }
+
+      if (missing.length) {
+        html += `<div style="margin-top:10px;"><span class="badge">Nem található SKU-k: ${escapeHtml(missing.join(", "))}</span></div>`;
+      }
+
+      html += `</div>`;
+      return html;
+    }
+
+    function toggleDetails(index) {
+      const detailsRow = document.getElementById(`details-${index}`);
+      const button = document.querySelector(`button[data-index="${index}"]`);
+      const row = filteredRows[index];
+
+      if (!detailsRow || !row) return;
+
+      const isOpen = detailsRow.style.display !== "none";
+
+      document.querySelectorAll(".details-row").forEach(r => r.style.display = "none");
+      document.querySelectorAll(".toggle-btn").forEach(b => {
+        if (!b.disabled) b.textContent = b.textContent.startsWith("Bezárás")
+          ? b.textContent.replace("Bezárás", "Megnézem")
+          : b.textContent;
+      });
+
+      if (isOpen) {
+        detailsRow.style.display = "none";
+        const upsellCount = parseUpsellList(getUpsell(row)).length;
+        button.textContent = `Megnézem (${upsellCount})`;
+        return;
+      }
+
+      detailsRow.children[0].innerHTML = buildUpsellHtml(row);
+      detailsRow.style.display = "";
+      button.textContent = "Bezárás";
+    }
+
+    function applyFilter() {
+      const q = normalizeText(document.getElementById("searchInput").value);
+
+      if (!q) {
+        filteredRows = [...allRows];
+      } else {
+        filteredRows = allRows.filter(row => {
+          const sku = normalizeText(getSku(row));
+          const name = normalizeText(getName(row));
+          const size = normalizeText(getSize(row));
+          const upsell = normalizeText(getUpsell(row));
+          return sku.includes(q) || name.includes(q) || size.includes(q) || upsell.includes(q);
+        });
+      }
+
+      renderTable(filteredRows);
+      document.getElementById("status").textContent = `${filteredRows.length} db termék látható.`;
+    }
+
+    async function loadData() {
+      const status = document.getElementById("status");
+      const tbody = document.getElementById("tableBody");
+
+      try {
+        status.textContent = "Adatok betöltése...";
+        tbody.innerHTML = `<tr><td colspan="4">Betöltés...</td></tr>`;
+
+        const buffer = await fetchArrayBuffer(DATA_URL);
+        const data = workbookToJson(buffer);
+
+        if (!Array.isArray(data) || !data.length) {
+          throw new Error("A fájl üres vagy nem sikerült értelmezni.");
+        }
+
+        allRows = data;
+        rebuildSkuMap();
+        filteredRows = [...allRows];
+        renderTable(filteredRows);
+
+        status.textContent = `${allRows.length} db termék betöltve.`;
+      } catch (err) {
+        console.error(err);
+        status.innerHTML = `<span class="error">Hiba: ${escapeHtml(err.message)}</span>`;
+        tbody.innerHTML = `
+          <tr>
+            <td colspan="4">
+              Nem sikerült betölteni az adatokat.<br><br>
+              Lehetséges okok:<br>
+              - a link nem engedi a böngészős elérést<br>
+              - CORS tiltás van a szerveren<br>
+              - a fájl nem Excel formátumú
+            </td>
+          </tr>
+        `;
+      }
+    }
+
+    document.getElementById("searchInput").addEventListener("input", applyFilter);
+    document.getElementById("reloadBtn").addEventListener("click", loadData);
+
+    loadData();
+  </script>
+</body>
+</html>
